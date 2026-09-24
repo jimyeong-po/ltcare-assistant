@@ -1,1 +1,30 @@
+〈?xml version="1.0" encoding="utf-8"?〉
+〈LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+android:layout_width="match_parent"
+android:layout_height="match_parent"
+android:gravity="center"
+android:orientation="vertical"
+android:padding="24dp"〉
 
+〈TextView
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:text="장기요양 일지 도우미"
+    android:textSize="22sp"
+    android:textStyle="bold" /〉
+
+〈TextView
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:layout_marginTop="12dp"
+    android:text="버튼을 누르면 화면 위에 항상 떠 있는 미니 위젯이 실행됩니다."
+    android:textAlignment="center"
+    android:textColor="#666666" /〉
+
+〈Button
+    android:id="@+id/btnStartService"
+    android:layout_width="match_parent"
+    android:layout_height="54dp"
+    android:layout_marginTop="32dp"
+    android:text="플로팅 위젯 시작하기" /〉
+〈/LinearLayout〉
