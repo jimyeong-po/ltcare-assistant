@@ -22,13 +22,14 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        findViewById(R.id.btnStartService).setOnClickListener {
+        val btnStart: Button = findViewById(R.id.btnStartService)
+        btnStart.setOnClickListener {
             checkPermissionsAndStart()
         }
     }
 
     private fun checkPermissionsAndStart() {
-        // 1. 오버레이 권한 확인
+        // 1. 다른 앱 위에 그리기 권한 확인
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
             val intent = Intent(
                 Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
@@ -59,6 +60,7 @@ class MainActivity : AppCompatActivity() {
         } else {
             startService(serviceIntent)
         }
-        finish() // 플로팅 실행 후 메인 화면은 닫음
+        Toast.makeText(this, "플로팅 위젯이 시작되었습니다.", Toast.LENGTH_SHORT).show()
+        finish()
     }
 }
