@@ -1,17 +1,16 @@
 package com.example.ltcareassistant
 
-import android.app.*
-import android.content.*
+import android.accessibilityservice.AccessibilityService
 import android.graphics.PixelFormat
 import android.media.MediaRecorder
 import android.os.Build
-import android.os.IBinder
+import android.os.Bundle
 import android.view.*
+import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Button
-import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
-import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.*
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
@@ -19,235 +18,205 @@ import okhttp3.RequestBody.Companion.asRequestBody
 import org.json.JSONObject
 import java.io.File
 
-class FloatingService : Service() {
+class FloatingService : AccessibilityService() {
 
     private lateinit var windowManager: WindowManager
     private lateinit var floatingView: View
-    private lateinit var btnRecord: Button
+    private lateinit var btnAction: Button
     private lateinit var tvStatus: TextView
 
     private var isRecording = false
     private var mediaRecorder: MediaRecorder? = null
     private var audioFilePath: String = ""
 
-    // 백엔드 API 주소 (실제 서버 IP/도메인으로 변경)
+    // 백엔드 Gemini 분석 API 주소
     private val SERVER_URL = "http://your-server-ip:8000/analyze-recording"
-    private val okHttpClient = OkHttpClient()
     private val serviceScope = CoroutineScope(Dispatchers.Main + Job())
+    private var cachedData: JSONObject? = null
 
-    override fun onBind(intent: Intent?): IBinder? = null
+    override fun onServiceConnected() {
+        super.onServiceConnected()
+        showFloatingWidget()
+    }
 
-    override fun onCreate() {
-        super.onCreate()
-        startAsForeground()
-
+    private fun showFloatingWidget() {
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         floatingView = LayoutInflater.from(this).inflate(R.layout.layout_floating_widget, null)
 
-        btnRecord = floatingView.findViewById(R.id.btnRecord)
+        btnAction = floatingView.findViewById(R.id.btnRecord)
         tvStatus = floatingView.findViewById(R.id.tvStatus)
-        val ivDragHandle = floatingView.findViewById(R.id.ivDragHandle)
-
-        // 윈도우 파라미터 구성
-        val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-        } else {
-            WindowManager.LayoutParams.TYPE_PHONE
-        }
 
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
-            layoutType,
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) 
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY 
+            else 
+                WindowManager.LayoutParams.TYPE_PHONE,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = 50
-            y = 200
+            x = 40
+            y = 260
         }
 
         windowManager.addView(floatingView, params)
 
-        // 제스처로 화면 드래그 이동
-        setupDragTouch(ivDragHandle, params)
-
-        // 녹음 버튼 클릭 리스너
-        btnRecord.setOnClickListener {
-            if (!isRecording) {
-                startRecording()
-            } else {
-                stopRecordingAndUpload()
+        btnAction.setOnClickListener {
+            when {
+                !isRecording && cachedData == null -> startRecording()
+                isRecording -> stopAndAnalyze()
+                cachedData != null -> fillSection3()
             }
         }
     }
 
     private fun startRecording() {
-        try {
-            audioFilePath = "${externalCacheDir?.absolutePath}/temp_counsel.m4a"
-            mediaRecorder = MediaRecorder().apply {
-                setAudioSource(MediaRecorder.AudioSource.MIC)
-                setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-                setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-                setOutputFile(audioFilePath)
-                prepare()
-                start()
-            }
-            isRecording = true
-            btnRecord.text = "종료 및 분석"
-            btnRecord.setBackgroundColor(0xFFD32F2F.toInt()) // 붉은색
-            tvStatus.text = "녹음 중..."
-        } catch (e: Exception) {
-            e.printStackTrace()
-            Toast.makeText(this, "녹음 시작 오류: ${e.message}", Toast.LENGTH_SHORT).show()
+        audioFilePath = "${externalCacheDir?.absolutePath}/record.m4a"
+        mediaRecorder = MediaRecorder().apply {
+            setAudioSource(MediaRecorder.AudioSource.MIC)
+            setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+            setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+            setOutputFile(audioFilePath)
+            prepare()
+            start()
         }
+        isRecording = true
+        btnAction.text = "분석 종료"
+        btnAction.setBackgroundColor(0xFFD32F2F.toInt()) // 빨간색
+        tvStatus.text = "어르신 상담 녹음 중..."
     }
 
-    private fun stopRecordingAndUpload() {
+    private fun stopAndAnalyze() {
         try {
             mediaRecorder?.apply {
                 stop()
                 release()
             }
-            mediaRecorder = null
-            isRecording = false
-            btnRecord.text = "분석 중..."
-            btnRecord.isEnabled = false
-            tvStatus.text = "AI 정리 중..."
-
-            // 서버로 전송
-            uploadAudioFile(File(audioFilePath))
-
         } catch (e: Exception) {
             e.printStackTrace()
-            resetUi()
         }
-    }
+        mediaRecorder = null
+        isRecording = false
+        btnAction.isEnabled = false
+        tvStatus.text = "3번 문항 AI 분석 중..."
 
-    private fun uploadAudioFile(file: File) {
         serviceScope.launch(Dispatchers.IO) {
             try {
-                val requestBody = MultipartBody.Builder()
-                    .setType(MultipartBody.FORM)
-                    .addFormDataPart(
-                        "file",
-                        file.name,
-                        file.asRequestBody("audio/mp4".toMediaTypeOrNull())
-                    )
-                    .build()
-
-                val request = Request.Builder()
+                val req = Request.Builder()
                     .url(SERVER_URL)
-                    .post(requestBody)
-                    .build()
+                    .post(
+                        MultipartBody.Builder().setType(MultipartBody.FORM)
+                            .addFormDataPart("file", "record.m4a", File(audioFilePath).asRequestBody("audio/mp4".toMediaTypeOrNull()))
+                            .build()
+                    ).build()
 
-                val response = okHttpClient.newCall(request).execute()
-                val responseData = response.body?.string()
+                val res = OkHttpClient().newCall(req).execute()
+                val body = res.body?.string() ?: ""
+                cachedData = JSONObject(body)
 
                 withContext(Dispatchers.Main) {
-                    if (response.isSuccessful && responseData != null) {
-                        val json = JSONObject(responseData)
-                        val summaryText = json.getString("result_text")
-
-                        // 1. 클립보드에 결과 자동 복사
-                        copyToClipboard(summaryText)
-
-                        // 2. 안내 토스트
-                        Toast.makeText(
-                            this@FloatingService,
-                            "3번 문항 내용이 복사되었습니다! 입력창에 붙여넣으세요.",
-                            Toast.LENGTH_LONG
-                        ).show()
-
-                        // 3. 스마트장기요양 앱 띄우기 (설치된 경우)
-                        launchTargetApp("kr.or.nhis.smartlongterm") // 실제 패키지명
-                    } else {
-                        Toast.makeText(this@FloatingService, "분석 실패: 서버 응답 오류", Toast.LENGTH_SHORT).show()
-                    }
-                    resetUi()
+                    btnAction.isEnabled = true
+                    btnAction.text = "자동 입력"
+                    btnAction.setBackgroundColor(0xFF1976D2.toInt()) // 파란색
+                    tvStatus.text = "준비 완료! 터치 시 입력"
+                    Toast.makeText(this@FloatingService, "분석 완료! 장기요양 3번 화면에서 [자동 입력]을 누르세요.", Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
-                    Toast.makeText(this@FloatingService, "전송 오류: ${e.message}", Toast.LENGTH_SHORT).show()
-                    resetUi()
+                    btnAction.isEnabled = true
+                    btnAction.text = "녹음 시작"
+                    btnAction.setBackgroundColor(0xFF2E7D32.toInt())
+                    tvStatus.text = "분석 오류 발생"
                 }
             }
         }
     }
 
-    private fun copyToClipboard(text: String) {
-        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        val clip = ClipData.newPlainText("3번 심신상태", text)
-        clipboard.setPrimaryClip(clip)
-    }
-
-    private fun launchTargetApp(packageName: String) {
-        val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
-        if (launchIntent != null) {
-            startActivity(launchIntent.apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            })
+    /** 3번 심신상태 및 환경변화 (10개 문항) 화면 자동 입력 **/
+    private fun fillSection3() {
+        val rootNode = rootInActiveWindow
+        if (rootNode == null) {
+            Toast.makeText(this, "장기요양 앱 화면을 먼저 켜주세요.", Toast.LENGTH_SHORT).show()
+            return
         }
+
+        val data = cachedData ?: return
+
+        // 10개 세부 문항 매핑 목록 (화면 키워드, JSON 키값)
+        val targets = listOf(
+            Pair("식사 및 영양", "meals"),
+            Pair("보행", "body_walk"),
+            Pair("신체기능", "body_function"),
+            Pair("배뇨", "excretion"),
+            Pair("위생관리", "adl_hygiene"),
+            Pair("일상생활수행", "adl_action"),
+            Pair("인지기능", "cognitive"),
+            Pair("행동증상", "behavior"),
+            Pair("생활 환경", "environment")
+        )
+
+        var filledCount = 0
+
+        for ((label, jsonKey) in targets) {
+            val itemData = data.optJSONObject(jsonKey) ?: continue
+            val status = itemData.optString("status", "유지")
+            val reason = itemData.optString("reason", "특이사항 없이 기존 상태 유지됨")
+
+            // 1. 해당 문항 제목 텍스트 탐색
+            val labelNodes = rootNode.findAccessibilityNodeInfosByText(label)
+            if (labelNodes.isNotEmpty()) {
+                val blockContainer = labelNodes[0].parent ?: continue
+
+                // 2. 라디오 버튼(유지/악화/호전) 클릭
+                val radioNode = blockContainer.findAccessibilityNodeInfosByText(status).firstOrNull()
+                radioNode?.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+
+                // 3. 판단근거 입력칸에 내용 주입
+                fillEditText(blockContainer, reason)
+                filledCount++
+            }
+        }
+
+        // 9. 기타 및 종합의견 처리
+        val summaryOpinion = data.optString("summary_opinion", "")
+        if (summaryOpinion.isNotEmpty()) {
+            val summaryNode = rootNode.findAccessibilityNodeInfosByText("종합의견").firstOrNull()
+            if (summaryNode != null) {
+                val container = summaryNode.parent ?: summaryNode
+                fillEditText(container, summaryOpinion)
+            }
+        }
+
+        // 입력 완료 처리 및 상태 리셋
+        Toast.makeText(this, "3번 문항 작성이 완료되었습니다! 확인 후 저장하세요.", Toast.LENGTH_LONG).show()
+        cachedData = null
+        btnAction.text = "녹음 시작"
+        btnAction.setBackgroundColor(0xFF2E7D32.toInt()) // 초록색 복귀
+        tvStatus.text = "대기중"
     }
 
-    private fun resetUi() {
-        btnRecord.text = "녹음 시작"
-        btnRecord.setBackgroundColor(0xFF2E7D32.toInt())
-        btnRecord.isEnabled = true
-        tvStatus.text = "완료/대기"
-    }
-
-    private fun setupDragTouch(handle: View, params: WindowManager.LayoutParams) {
-        var initialX = 0
-        var initialY = 0
-        var initialTouchX = 0f
-        var initialTouchY = 0f
-
-        handle.setOnTouchListener { _, event ->
-            when (event.action) {
-                MotionEvent.ACTION_DOWN -> {
-                    initialX = params.x
-                    initialY = params.y
-                    initialTouchX = event.rawX
-                    initialTouchY = event.rawY
-                    true
+    /** 인접/하위의 EditText를 찾아 텍스트를 채워 넣는 함수 **/
+    private fun fillEditText(container: AccessibilityNodeInfo, text: String) {
+        for (i in 0 until container.childCount) {
+            val child = container.getChild(i) ?: continue
+            if (child.className == "android.widget.EditText") {
+                val args = Bundle().apply {
+                    putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
                 }
-                MotionEvent.ACTION_MOVE -> {
-                    params.x = initialX + (event.rawX - initialTouchX).toInt()
-                    params.y = initialY + (event.rawY - initialTouchY).toInt()
-                    windowManager.updateViewLayout(floatingView, params)
-                    true
-                }
-                else -> false
+                child.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+                return
             }
         }
     }
 
-    private fun startAsForeground() {
-        val channelId = "floating_service_channel"
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                channelId,
-                "일지 도우미 실행 중",
-                NotificationManager.IMPORTANCE_LOW
-            )
-            getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
-        }
-
-        val notification = NotificationCompat.Builder(this, channelId)
-            .setContentTitle("장기요양 일지 도우미")
-            .setContentText("플로팅 버튼이 활성화되어 있습니다.")
-            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .build()
-
-        startForeground(1, notification)
-    }
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
+    override fun onInterrupt() {}
 
     override fun onDestroy() {
         super.onDestroy()
         serviceScope.cancel()
-        if (::floatingView.isInitialized) {
-            windowManager.removeView(floatingView)
-        }
+        if (::floatingView.isInitialized) windowManager.removeView(floatingView)
     }
 }
